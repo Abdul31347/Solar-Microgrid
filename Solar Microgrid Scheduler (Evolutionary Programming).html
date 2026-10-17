@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Microgrid Scheduler with Evolutionary Programming</title>
+<style>
+:root{--bg:#eaf1f5;--card:#f9fcfd;--ink:#10222d;--mute:#53687a;--line:#cfdce4;--pv:#e0a21b;--bat:#1f8a8a;--dsl:#b4432f;--acc:#1f5f8b;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0e1a22;--card:#15262f;--ink:#e6eff4;--mute:#97aebd;--line:#26414f;--pv:#f1b93e;--bat:#46b9b4;--dsl:#e5745e;--acc:#6db3e0}}
+:root[data-theme="dark"]{--bg:#0e1a22;--card:#15262f;--ink:#e6eff4;--mute:#97aebd;--line:#26414f;--pv:#f1b93e;--bat:#46b9b4;--dsl:#e5745e;--acc:#6db3e0}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:980px;margin:0 auto;padding:20px 16px 48px}
+h1{font:600 clamp(26px,5vw,38px)/1.15 Georgia,"Times New Roman",serif;margin:8px 0 6px}
+h2{font:600 19px Georgia,serif;margin:0 0 10px}
+p{margin:0 0 10px;max-width:68ch}.mute{color:var(--mute)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-top:16px}
+.ctl{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px}
+label{display:flex;flex-direction:column;font-size:13px;color:var(--mute);gap:4px}
+input{font:inherit;padding:7px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);width:100%}
+button{font:inherit;font-weight:600;padding:9px 16px;border-radius:6px;border:1px solid var(--acc);background:var(--acc);color:var(--bg);cursor:pointer}
+button.o{background:transparent;color:var(--acc)}button:focus-visible,input:focus-visible{outline:3px solid var(--pv);outline-offset:2px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:14px}
+canvas{width:100%;height:280px;display:block}canvas.s{height:200px}
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
+.big{font:600 40px Georgia,serif;color:var(--bat)}
+.tw{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{padding:7px 8px;border-bottom:1px solid var(--line);text-align:right}th:first-child,td:first-child{text-align:left}
+ol{padding-left:20px;margin:0}li{margin-bottom:8px;max-width:72ch}code{font-size:13px}
+</style></head><body><main>
+<h1>Scheduling a solar microgrid with Evolutionary Programming</h1>
+<p class="mute">A rural health centre has solar panels, a battery and a diesel generator. The algorithm below, written from scratch with no optimisation libraries, learns an hour-by-hour plan that burns as little diesel as possible while the critical load is never left unpowered.</p>
+
+<section class="card"><h2>Scenario</h2>
+<div class="ctl">
+<label>Average load (kW)<input id="load" type="number" value="4" min="1" max="20" step="0.5"></label>
+<label>Solar peak (kW)<input id="pv" type="number" value="10" min="0" max="30" step="0.5"></label>
+<label>Battery size (kWh)<input id="cap" type="number" value="20" min="2" max="100" step="1"></label>
+<label>Diesel price (₹/L)<input id="price" type="number" value="100" min="10" max="300" step="5"></label>
+<label>Generations<input id="gens" type="number" value="300" min="20" max="1000" step="20"></label>
+<label>Random seed<input id="seed" type="number" value="42" step="1"></label>
+</div>
+<div class="row"><button id="run">Run evolution</button><button id="multi" class="o">Run 10 seeds</button><span id="gl" class="mute"></span></div>
+</section>
+
+<section class="card"><h2>The evolved 24-hour schedule</h2>
+<canvas id="c2" role="img" aria-label="Stacked chart of solar, battery and diesel power per hour against the load"></canvas>
+<p class="mute" style="margin-top:8px;font-size:14px">Bars above zero are supply from solar (amber), battery discharge (teal) and diesel (red). Bars below zero are battery charging. The black line is the load the plan must cover.</p></section>
+
+<div class="two">
+<section class="card"><h2>Convergence</h2><canvas id="c1" class="s" role="img" aria-label="Best cost per generation on a log scale"></canvas></section>
+<section class="card"><h2>Battery charge</h2><canvas id="c3" class="s" role="img" aria-label="Battery energy over the day for EP and the rule-based plan"></canvas></section>
+</div>
+
+<section class="card"><h2>Evolutionary Programming against a rule-based plan</h2>
+<div class="two"><div><div class="big" id="save">-</div><p class="mute">lower total cost than the rule "solar first, then battery, then diesel".</p></div>
+<div class="tw"><table><thead><tr><th></th><th>EP</th><th>Rule-based</th></tr></thead><tbody id="tb"></tbody></table></div></div>
+<div id="mr" class="tw" style="margin-top:12px"></div></section>
+
+<section class="card"><h2>How it works</h2>
+<ol>
+<li><b>One individual is one whole day.</b> It holds 48 numbers: diesel output and battery power for each of 24 hours, plus a mutation step size for every number.</li>
+<li><b>Fitness is a simulation.</b> The day is replayed hour by hour while tracking battery charge. Cost is diesel burned (0.27 L/kWh plus 0.6 L/h while running) times price, plus heavy penalties for unmet load, battery limits (20% to 100%) and ending the day below the starting charge.</li>
+<li><b>Mutation is the only variation.</b> Each of 30 parents makes one child. Step sizes change first, σ' = σ·exp(τ'N + τNⱼ), then values move by σ'·N(0,1). Good step sizes survive along with good schedules, so the search tunes itself.</li>
+<li><b>Selection is a tournament.</b> Parents and children (60) each face 10 random rivals and score a win for every rival they beat. The 30 with the most wins form the next generation.</li>
+<li><b>The random numbers are hand-made.</b> A small seeded generator supplies uniform numbers and the Box-Muller transform turns them into Gaussian ones.</li></ol></section>
+</main>
+<script>
+const H=24,$=id=>document.getElementById(id);
+/* drawing */
+const col=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+function cv(id){const c=$(id),d=window.devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;c.width=w*d;c.height=h*d;
+ const x=c.getContext('2d');x.setTransform(d,0,0,d,0,0);x.clearRect(0,0,w,h);x.font='11px system-ui,sans-serif';return[x,w,h]}
+function line(id,ser,y0,y1,fy,xl){const[c,w,h]=cv(id),L=44,R=8,T=20,B=22,n=Math.max(...ser.map(s=>s.d.length));
+ const X=i=>L+(w-L-R)*i/Math.max(1,n-1),Y=v=>T+(h-T-B)*(y1-v)/(y1-y0);
+ c.lineWidth=1;for(let k=0;k<=4;k++){const v=y0+(y1-y0)*k/4,yy=Y(v);c.strokeStyle=col('--line');c.beginPath();c.moveTo(L,yy);c.lineTo(w-R,yy);c.stroke();c.fillStyle=col('--mute');c.fillText(fy(v),2,yy+4)}
+ c.fillStyle=col('--mute');c.fillText(xl,L,h-5);
+ let lx=L;ser.forEach(s=>{c.strokeStyle=col(s.c);c.lineWidth=2;c.setLineDash(s.dash?[5,4]:[]);c.beginPath();
+  s.d.forEach((v,i)=>i?c.lineTo(X(i),Y(v)):c.moveTo(X(i),Y(v)));c.stroke();c.setLineDash([]);
+  c.fillStyle=col(s.c);c.fillText(s.l,lx,11);lx+=c.measureText(s.l).width+14})}
+function sched(x,S){const[c,w,h]=cv('c2'),L=40,R=8,T=14,B=24;let mx=0;
+ for(let t=0;t<H;t++){const D=x[t]<0.3?0:x[t];mx=Math.max(mx,S.pv[t]+Math.max(0,x[H+t])+D,S.load[t])}
+ mx*=1.1;const mn=-S.bmax*1.05,X=t=>L+(w-L-R)*t/H,Y=v=>T+(h-T-B)*(mx-v)/(mx-mn),bw=(w-L-R)/H*0.72,off=(w-L-R)/H*0.14;
+ c.lineWidth=1;[mn,0,mx/2,mx].forEach(v=>{const yy=Y(v);c.strokeStyle=col('--line');c.beginPath();c.moveTo(L,yy);c.lineTo(w-R,yy);c.stroke();c.fillStyle=col('--mute');c.fillText(v.toFixed(0),4,yy+4)});
+ const bar=(t,a,b,k)=>{c.fillStyle=col(k);c.fillRect(X(t)+off,Y(b),bw,Y(a)-Y(b))};
+ for(let t=0;t<H;t++){const D=x[t]<0.3?0:x[t],Bt=x[H+t],p=S.pv[t];
+  bar(t,0,p,'--pv');if(Bt>0)bar(t,p,p+Bt,'--bat');else bar(t,Bt,0,'--bat');bar(t,p+Math.max(0,Bt),p+Math.max(0,Bt)+D,'--dsl');
+  if(t%3===0){c.fillStyle=col('--mute');c.fillText(t+':00',X(t)+off,h-8)}}
+ c.strokeStyle=col('--ink');c.lineWidth=2;c.beginPath();
+ for(let t=0;t<H;t++){const yy=Y(S.load[t]);t?c.lineTo(X(t),yy):c.moveTo(X(t),yy);c.lineTo(X(t+1),yy)}c.stroke();
+ c.fillStyle=col('--mute');c.fillText('kW',4,10)}
+/* Backend API integration */
+let latestResult = null;
+let S = null;
+
+const f1 = n => Number(n).toFixed(1);
+const API_BASE = 'http://127.0.0.1:8000/api/scheduler';
+
+function getPayload() {
+  return {
+    average_load: Number($('load').value),
+    solar_peak: Number($('pv').value),
+    battery_capacity: Number($('cap').value),
+    diesel_price: Number($('price').value),
+    generations: Number($('gens').value),
+    seed: Number($('seed').value)
+  };
+}
+
+function show(data) {
+  latestResult = data;
+  S = data.scenario;
+
+  const x = data.schedule;
+  const e = data.ep;
+  const b = data.baseline;
+  const hist = data.history;
+
+  const rows = [
+    ['Diesel burned (L)', e.fuel, b.fuel],
+    ['Fuel cost (₹)', e.cost, b.cost],
+    ['Unmet load (kWh)', e.unmet, b.unmet],
+    ['Battery end shortfall (kWh)', e.es, b.es],
+    ['Total with penalties (₹)', e.total, b.total]
+  ];
+
+  $('tb').innerHTML = rows.map(r =>
+    `<tr><td>${r[0]}</td><td>${f1(r[1])}</td><td>${f1(r[2])}</td></tr>`
+  ).join('');
+
+  $('save').textContent = b.total > 0
+    ? f1((b.total - e.total) / b.total * 100) + '%'
+    : '-';
+
+  const lg = v => Math.log(Math.max(v, 1)) / Math.LN10;
+  const hl = hist.map(lg);
+  const bl = lg(b.total);
+  const lo = Math.min(...hl, bl);
+  const hi = Math.max(...hl, bl);
+
+  line('c1', [
+    { d: hl, c: '--acc', l: 'EP best' },
+    { d: hl.map(() => bl), c: '--dsl', l: 'rule-based', dash: 1 }
+  ], lo - 0.1, hi + 0.1, v => '10^' + v.toFixed(1), 'generation');
+
+  line('c3', [
+    { d: e.socs.map(v => v / S.cap * 100), c: '--bat', l: 'EP' },
+    { d: b.socs.map(v => v / S.cap * 100), c: '--dsl', l: 'rule-based', dash: 1 }
+  ], 0, 100, v => v.toFixed(0) + '%', 'hour of day');
+
+  sched(x, S);
+  $('gl').textContent = 'Generation ' + data.generations + ' of ' + data.generations;
+}
+
+async function run() {
+  $('run').disabled = true;
+  $('gl').textContent = 'Running optimization...';
+
+  try {
+    const response = await fetch(`${API_BASE}/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(getPayload())
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+    }
+
+    show(await response.json());
+  } catch (error) {
+    console.error('Scheduling request failed:', error);
+    $('gl').textContent = 'Backend connection failed. Check that FastAPI is running.';
+  } finally {
+    $('run').disabled = false;
+  }
+}
+
+async function multi() {
+  $('multi').disabled = true;
+  $('mr').textContent = 'Running 10 independent trials...';
+
+  try {
+    const response = await fetch(`${API_BASE}/multi-run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(getPayload())
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+    }
+
+    const result = await response.json();
+    const total = result.total_cost;
+    const fuel = result.fuel_cost;
+
+    $('mr').innerHTML =
+      '<table><thead><tr><th>10 independent runs</th><th>Best</th><th>Mean</th><th>Std dev</th></tr></thead><tbody>' +
+      `<tr><td>Total cost (₹)</td><td>${f1(total.best)}</td><td>${f1(total.mean)}</td><td>${f1(total.std_dev)}</td></tr>` +
+      `<tr><td>Fuel cost (₹)</td><td>${f1(fuel.best)}</td><td>${f1(fuel.mean)}</td><td>${f1(fuel.std_dev)}</td></tr>` +
+      '</tbody></table>';
+  } catch (error) {
+    console.error('Multiple-run request failed:', error);
+    $('mr').textContent = 'Multiple runs failed. Check that FastAPI is running.';
+  } finally {
+    $('multi').disabled = false;
+  }
+}
+
+$('run').onclick = run;
+$('multi').onclick = multi;
+
+let rt;
+addEventListener('resize', () => {
+  clearTimeout(rt);
+  rt = setTimeout(() => {
+    if (latestResult) show(latestResult);
+  }, 150);
+});
+
+matchMedia('(prefers-color-scheme:dark)').addEventListener('change', () => {
+  if (latestResult) show(latestResult);
+});
+
+run();
+</script></body></html>
